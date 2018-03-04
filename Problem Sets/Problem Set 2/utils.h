@@ -11,6 +11,17 @@
 
 #define checkCudaErrors(val) check( (val), #val, __FILE__, __LINE__)
 
+#define DEBUG
+
+#ifdef DEBUG
+#include <stdio.h>
+#include <assert.h>
+
+#define DEBUG_INFO(fmt, args...) { printf("DEBUG: " fmt "\n", ##args); }
+#else
+#define DEBUG_INFO(fmt, args...) {}
+#endif
+
 template<typename T>
 void check(T err, const char* const func, const char* const file, const int line) {
   if (err != cudaSuccess) {

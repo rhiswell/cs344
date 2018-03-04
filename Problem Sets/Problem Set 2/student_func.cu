@@ -134,17 +134,148 @@ void gaussian_blur(const unsigned char* const inputChannel,
   if (thread_2D_pos.x >= numCols || thread_2D_pos.y >= numRows)
     return;
 
+  // \begin shit code
+  // Cache sub. image in shared memory
+  const int conv_radius = filterWidth / 2;
+  const int sub_image_cols = blockDim.x + 2 * conv_radius;
+  const int sub_image_rows = blockDim.y + 2 * conv_radius;
+  // Error: this expression should have a constant value
+  //__shared__ unsigned char sub_image[sub_image_rows * sub_image_cols];
+  __shared__ unsigned char sub_image[24 * 24];    // (16 + 8)^2
+  int sub_image_x = threadIdx.x + conv_radius;
+  int sub_image_y = threadIdx.y + conv_radius;
+
+  // Center
+  sub_image[sub_image_y * sub_image_cols + sub_image_x] = inputChannel[thread_1D_pos];
+
+  // Upper
+  if (threadIdx.y == 0 && thread_2D_pos.y != 0) {
+    for (int offset = -conv_radius; offset < 0; offset++) {
+      int idx = (thread_2D_pos.y + offset) * numCols + thread_2D_pos.x;
+      sub_image[(offset + conv_radius) * sub_image_cols + sub_image_x] = inputChannel[idx];
+    }
+  } 
+
+  if (thread_2D_pos.y == 0) {
+    for (int offset = -conv_radius; offset < 0; offset++)
+      sub_image[(offset + conv_radius) * sub_image_cols + sub_image_x] = inputChannel[thread_1D_pos];
+  }
+
+  // Left
+  if (threadIdx.x == 0 && thread_2D_pos.x != 0) {
+    for (int offset = -conv_radius; offset < 0; offset++) {
+      int idx = thread_2D_pos.y * numCols + thread_2D_pos.x + offset;
+      sub_image[sub_image_y * sub_image_cols + offset + conv_radius] = inputChannel[idx];
+    }
+  } 
+
+  if (thread_2D_pos.x == 0) {
+    for (int offset = -conv_radius; offset < 0; offset++)
+      sub_image[sub_image_y * sub_image_cols + offset + conv_radius] = inputChannel[thread_1D_pos];
+  }
+
+  // Bottom
+  if (threadIdx.y == blockDim.y-1 && thread_2D_pos.y != numRows-1) {
+    for (int offset = 1; offset <= conv_radius; offset++) {
+      int idx = (thread_2D_pos.y + offset) * numCols + thread_2D_pos.x;
+      sub_image[(blockDim.y-1 + offset + conv_radius) * sub_image_cols + sub_image_x] = inputChannel[idx];
+    }
+  } 
+
+  if (thread_2D_pos.y == numRows-1) {
+    for (int offset = 1; offset <= conv_radius; offset++)
+      sub_image[(blockDim.y-1 + offset + conv_radius) * sub_image_cols + sub_image_x] = inputChannel[thread_1D_pos];
+  }
+
+  // Right
+  if (threadIdx.x == blockDim.x-1 && thread_2D_pos.x != numCols-1) {
+    for (int offset = 1; offset <= conv_radius; offset++) {
+      int idx = thread_2D_pos.y * numCols + thread_2D_pos.x + offset;
+      sub_image[sub_image_y * sub_image_cols + blockDim.x-1 + offset + conv_radius] = inputChannel[idx];
+    }
+  } 
+
+  if (thread_2D_pos.x == numCols-1) {
+    for (int offset = 1; offset <= conv_radius; offset++)
+      sub_image[sub_image_y * sub_image_cols + blockDim.x-1 + offset + conv_radius] = inputChannel[thread_1D_pos];
+  }
+
+  // Upper-left
+  if (threadIdx.x == 0 && threadIdx.y == 0 && thread_2D_pos.x != 0) {
+    for (int offset_y = -conv_radius; offset_y < 0; offset_y++) {
+      for (int offset_x = -conv_radius; offset_x < 0; offset_x++) {
+        int idx = (thread_2D_pos.y + offset_y) * numCols + thread_2D_pos.x + offset_x;
+        sub_image[(offset_y + conv_radius) * sub_image_cols + offset_x + conv_radius] = inputChannel[idx];
+      }
+    }
+  } 
+  
+  if (thread_2D_pos.x == 0 && thread_2D_pos.y == 0) {
+    for (int offset_y = -conv_radius; offset_y < 0; offset_y++)
+      for (int offset_x = -conv_radius; offset_x < 0; offset_x++)
+        sub_image[(offset_y + conv_radius) * sub_image_cols + offset_x + conv_radius] = inputChannel[thread_1D_pos];
+  }
+
+  // Upper-right
+  if (threadIdx.x == blockDim.x-1 && threadIdx.y == 0 && thread_2D_pos.x != numCols-1) {
+    for (int offset_y = -conv_radius; offset_y < 0; offset_y++) {
+      for (int offset_x = 1; offset_x <= conv_radius; offset_x++) {
+        int idx = (thread_2D_pos.y + offset_y) * numCols + thread_2D_pos.x + offset_x;
+        sub_image[(sub_image_y + offset_y) * sub_image_cols + blockDim.x-1 + offset_x + conv_radius] = inputChannel[idx];
+      }
+    }
+  } 
+  
+  if (thread_2D_pos.x == numCols-1 && thread_2D_pos.y == 0) {
+    for (int offset_y = -conv_radius; offset_y < 0; offset_y++)
+      for (int offset_x = 1; offset_x <= conv_radius; offset_x++)
+        sub_image[(sub_image_y + offset_y) * sub_image_cols + blockDim.x-1 + offset_x + conv_radius] = inputChannel[thread_1D_pos];
+  }
+
+  // Bottom-left
+  if (threadIdx.x == 0 && threadIdx.y == blockDim.y-1 && thread_2D_pos.x != 0) {
+    for (int offset_y = 1; offset_y <= conv_radius; offset_y++) {
+      for (int offset_x = -conv_radius; offset_x < 0; offset_x++) {
+        int idx = (thread_2D_pos.y + offset_y) * numCols + thread_2D_pos.x + offset_x;
+        sub_image[(blockDim.y-1 + offset_y + conv_radius) * sub_image_cols + sub_image_x + offset_x] = inputChannel[idx];
+      }
+    }
+  } 
+  
+  if (thread_2D_pos.x == 0 && thread_2D_pos.y == numRows-1) {
+    for (int offset_y = 1; offset_y <= conv_radius; offset_y++)
+      for (int offset_x = -conv_radius; offset_x < 0; offset_x++)
+        sub_image[(blockDim.y-1 + offset_y + conv_radius) * sub_image_cols + sub_image_x + offset_x] = inputChannel[thread_1D_pos];
+  }
+
+  // Bottom-right
+  if (threadIdx.x == blockDim.x-1 && threadIdx.y == blockDim.y-1 && thread_2D_pos.x != numCols-1) {
+    for (int offset_y = 1; offset_y <= conv_radius; offset_y++) {
+      for (int offset_x = 1; offset_x <= conv_radius; offset_x++) {
+        int idx = (thread_2D_pos.y + offset_y) * numCols + thread_2D_pos.x + offset_x;
+        sub_image[(blockDim.y-1 + offset_y + conv_radius) * sub_image_cols + blockDim.x-1 + offset_x + conv_radius] = inputChannel[idx];
+      }
+    }
+  } 
+  
+  if (thread_2D_pos.x == numCols-1 && thread_2D_pos.y == numRows-1) {
+    for (int offset_y = 1; offset_y <= conv_radius; offset_y++)
+      for (int offset_x = 1; offset_x <= conv_radius; offset_x++)
+        sub_image[(blockDim.y-1 + offset_y + conv_radius) * sub_image_cols + blockDim.x-1 + offset_x + conv_radius] = inputChannel[thread_1D_pos];
+  }
+
+  __syncthreads();
+  // \end shit code
+
   float result = 0.f;
 
-  int offset = filterWidth / 2;
-  for (int filter_r = -offset; filter_r <= offset; filter_r++) {
-    for (int filter_c = -offset; filter_c <= offset; filter_c++) {
-      // Clamp to boundary of the image
-      int image_r = min(max(thread_2D_pos.y + filter_r, 0), numRows - 1);
-      int image_c = min(max(thread_2D_pos.x + filter_c, 0), numCols - 1);
+  for (int filter_y = -conv_radius; filter_y <= conv_radius; filter_y++) {
+    for (int filter_x = -conv_radius; filter_x <= conv_radius; filter_x++) {
+      sub_image_x = threadIdx.x + conv_radius + filter_x;
+      sub_image_y = threadIdx.y + conv_radius + filter_y;
 
-      float image_value = static_cast<float>(inputChannel[image_r * numCols + image_c]);
-      float filter_value = filter[(filter_r + offset) * filterWidth + (filter_c + offset)];
+      float image_value = static_cast<float>(sub_image[sub_image_y * sub_image_cols + sub_image_x]);
+      float filter_value = filter[(filter_y + conv_radius) * filterWidth + (filter_x + conv_radius)];
 
       result += image_value * filter_value;
     }
