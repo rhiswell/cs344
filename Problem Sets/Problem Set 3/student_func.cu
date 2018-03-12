@@ -61,7 +61,7 @@
   In this assignment we are going to transform the luminance channel (actually
   the log of the luminance, but this is unimportant for the parts of the
   algorithm that you will be implementing) by compressing its range to [0, 1].
-  To do this we need the cumulative distribution of the luminance values.
+  To do this we need the cumulative histogram of the luminance values.
 
   Example
   -------
@@ -74,12 +74,104 @@
   cdf : [4 11 14]
 
 
-  Your task is to calculate this cumulative distribution by following these
+  Your task is to calculate this cumulative histogram by following these
   steps.
 
 */
 
 #include "utils.h"
+#include <math.h>
+#include <stdio.h>
+#include <assert.h>
+
+#define DEBUG_INFO(fmt, args...) { printf("DEBUG: " fmt "\n", ##args); }
+
+inline int NextPow2(int n)
+{
+  n--;
+  n |= n >> 1;
+  n |= n >> 2;
+  n |= n >> 4;
+  n |= n >> 8;
+  n |= n >> 16;
+  n++;
+  return n;
+}
+
+__device__ __constant__ float kVal;
+
+__global__ void kernelScatter(float *d_buf, int start, int end)
+{
+  int thread_1D_pos = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (thread_1D_pos < end)
+    d_buf[thread_1D_pos + start] = kVal;
+}
+
+__global__ void kernelFindMin(float *d_buf, int stride, int end)
+{
+  int thread_1D_pos = blockIdx.x * blockDim.x + threadIdx.x;
+  int new_idx = thread_1D_pos * (2 * stride);
+
+  if (new_idx < end) {
+    int first = d_buf[new_idx], second = d_buf[new_idx + stride];
+    d_buf[new_idx] = min(first, second);
+  }
+}
+
+__global__ void kernelFindMax(float *d_buf, int stride, int end)
+{
+  int thread_1D_pos = blockIdx.x * blockDim.x + threadIdx.x;
+  int new_idx = thread_1D_pos * (2 * stride);
+
+  if (new_idx < end) {
+    int first = d_buf[new_idx], second = d_buf[new_idx + stride];
+    d_buf[new_idx] = max(first, second);
+  }
+}
+
+__global__ void kernelHistogram(const float * const d_logLuminance,
+                                unsigned int *d_histogram,
+                                float min_logLum,
+                                float lumRange,
+                                const size_t numBins,
+                                int len)
+{
+  int thread_1D_pos = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (thread_1D_pos < len) {
+    int bin = (d_logLuminance[thread_1D_pos] - min_logLum) / lumRange * numBins;
+    atomicAdd(&d_histogram[bin], 1);
+  }
+}
+
+__global__ void kernelScanUpsweep(unsigned int *d_hist, int len, int twod)
+{
+  int thread_1D_pos = blockIdx.x * blockDim.x + threadIdx.x;
+  int twod1 = twod * 2;
+  int new_idx = thread_1D_pos * twod1;
+
+  if (new_idx < len)
+    d_hist[new_idx + twod1 - 1] += d_hist[new_idx + twod - 1];
+}
+
+__global__ void kernelScanDownsweep(unsigned int *d_hist, int len, int twod)
+{
+  int thread_1D_pos = blockIdx.x * blockDim.x + threadIdx.x;
+  int twod1 = twod * 2;
+  int new_idx = thread_1D_pos * twod1;
+
+  if (new_idx < len) {
+    int buf = d_hist[new_idx + twod - 1];
+    d_hist[new_idx + twod - 1] = d_hist[new_idx + twod1 - 1];
+    d_hist[new_idx + twod1 - 1] += buf;
+  }
+}
+
+__global__ void kernelSetLastZero(unsigned int *d_buf, int len)
+{
+  d_buf[len-1] = 0;
+}
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
@@ -89,16 +181,78 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numCols,
                                   const size_t numBins)
 {
-  //TODO
   /*Here are the steps you need to implement
     1) find the minimum and maximum value in the input logLuminance channel
-       store in min_logLum and max_logLum
+    store in min_logLum and max_logLum
     2) subtract them to find the range
     3) generate a histogram of all the values in the logLuminance channel using
-       the formula: bin = (lum[i] - lumMin) / lumRange * numBins
+    the formula: bin = (lum[i] - lumMin) / lumRange * numBins
     4) Perform an exclusive scan (prefix sum) on the histogram to get
-       the cumulative distribution of luminance values (this should go in the
-       incoming d_cdf pointer which already has been allocated for you)       */
+    the cumulative histogram of luminance values (this should go in the
+    incoming d_cdf pointer which already has been allocated for you)       */
+  int numPixels = numRows * numCols;
+  int roundedLen = NextPow2(numPixels);
+  int deltaLen = (roundedLen - numPixels);
+  float *d_buf0, *d_buf1;
+  dim3 blockSize(256);
+  dim3 gridSize;
 
+  checkCudaErrors(cudaMalloc(&d_buf0, roundedLen * sizeof(float)));
+  checkCudaErrors(cudaMalloc(&d_buf1, roundedLen * sizeof(float)));
+  checkCudaErrors(cudaMemcpy(d_buf0, d_logLuminance, numPixels * sizeof(float), cudaMemcpyDeviceToDevice));
+  checkCudaErrors(cudaMemcpy(d_buf1, d_logLuminance, numPixels * sizeof(float), cudaMemcpyDeviceToDevice));
+  checkCudaErrors(cudaMemcpyToSymbol(kVal, d_logLuminance, sizeof(float)));
 
+  // Prepare d_buf
+  gridSize.x = (deltaLen + blockSize.x - 1) / blockSize.x;
+  kernelScatter<<<gridSize, blockSize>>>(d_buf0, numPixels, roundedLen);
+  kernelScatter<<<gridSize, blockSize>>>(d_buf1, numPixels, roundedLen);
+  checkCudaErrors(cudaDeviceSynchronize());
+
+  // Reduce d_buf to find min / max
+  int steps = log2((double) roundedLen);
+  for (int step = 0; step < steps; step++) {
+    int stride = (1 << step);
+    gridSize.x = (roundedLen + stride - 1) / stride;
+    kernelFindMin<<<gridSize, blockSize>>>(d_buf0, stride, roundedLen);
+    kernelFindMax<<<gridSize, blockSize>>>(d_buf1, stride, roundedLen);
+    checkCudaErrors(cudaDeviceSynchronize());
+  }
+
+  // Copy min / max from device to host
+  checkCudaErrors(cudaMemcpy(&min_logLum, d_buf0, sizeof(float), cudaMemcpyDeviceToHost)); 
+  checkCudaErrors(cudaMemcpy(&max_logLum, d_buf1, sizeof(float), cudaMemcpyDeviceToHost));
+  DEBUG_INFO("min = %f, max = %f, bins = %d", min_logLum, max_logLum, numBins);
+
+  // Figure out histogram of luminance with atomicAdd
+  gridSize.x = (numPixels + blockSize.x - 1) / blockSize.x;
+  int lumRange = max_logLum - min_logLum;
+  kernelHistogram<<<gridSize, blockSize>>>(d_logLuminance, 
+                                           d_cdf, 
+                                           min_logLum, 
+                                           lumRange, 
+                                           numBins, 
+                                           numPixels);
+  checkCudaErrors(cudaDeviceSynchronize());
+
+  // Scan d_histogram to figure out CDF. And numBins should be power of 2.
+  for (int twod = 1; twod < numBins; twod *= 2) {
+    int twod1 = twod * 2;
+    gridSize.x = (numBins / twod1 + blockSize.x - 1) / blockSize.x;
+    kernelScanUpsweep<<<gridSize, blockSize>>>(d_cdf, numBins, twod);
+    checkCudaErrors(cudaDeviceSynchronize());
+  }
+
+  kernelSetLastZero<<<1, 1>>>(d_cdf, numBins);
+  checkCudaErrors(cudaDeviceSynchronize());
+
+  for (int twod = numBins / 2; twod >= 1; twod /= 2) {
+    int twod1 = twod * 2;
+    gridSize.x = (numBins / twod1 + blockSize.x - 1) / blockSize.x;
+    kernelScanDownsweep<<<gridSize, blockSize>>>(d_cdf, numBins, twod);
+    checkCudaErrors(cudaDeviceSynchronize());
+  }
+
+  cudaFree(d_buf0);
+  cudaFree(d_buf1);
 }
