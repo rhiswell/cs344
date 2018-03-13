@@ -114,7 +114,7 @@ __global__ void kernelFindMin(float *d_buf, int stride, int end)
   int new_idx = thread_1D_pos * (2 * stride);
 
   if (new_idx < end) {
-    int first = d_buf[new_idx], second = d_buf[new_idx + stride];
+    float first = d_buf[new_idx], second = d_buf[new_idx + stride];
     d_buf[new_idx] = min(first, second);
   }
 }
@@ -125,7 +125,7 @@ __global__ void kernelFindMax(float *d_buf, int stride, int end)
   int new_idx = thread_1D_pos * (2 * stride);
 
   if (new_idx < end) {
-    int first = d_buf[new_idx], second = d_buf[new_idx + stride];
+    float first = d_buf[new_idx], second = d_buf[new_idx + stride];
     d_buf[new_idx] = max(first, second);
   }
 }
@@ -222,11 +222,11 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   // Copy min / max from device to host
   checkCudaErrors(cudaMemcpy(&min_logLum, d_buf0, sizeof(float), cudaMemcpyDeviceToHost)); 
   checkCudaErrors(cudaMemcpy(&max_logLum, d_buf1, sizeof(float), cudaMemcpyDeviceToHost));
-  DEBUG_INFO("min = %f, max = %f, bins = %d", min_logLum, max_logLum, numBins);
 
   // Figure out histogram of luminance with atomicAdd
   gridSize.x = (numPixels + blockSize.x - 1) / blockSize.x;
-  int lumRange = max_logLum - min_logLum;
+  float lumRange = max_logLum - min_logLum;
+  checkCudaErrors(cudaMemset(d_cdf, 0, numBins * sizeof(unsigned int)));
   kernelHistogram<<<gridSize, blockSize>>>(d_logLuminance, 
                                            d_cdf, 
                                            min_logLum, 

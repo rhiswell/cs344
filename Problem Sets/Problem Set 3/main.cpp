@@ -5,6 +5,7 @@
 #include "utils.h"
 #include <string>
 #include <stdio.h>
+#include <string.h>
 #include <algorithm>
 
 #include "compare.h"
@@ -109,6 +110,27 @@ int main(int argc, char **argv) {
   }
 
   referenceCalculation(h_luminance, h_cdf, numRows, numCols, numBins, min_logLum, max_logLum);
+
+  // \begin debug
+  //printf("DEBUG: HOST: minLogLum = %f, maxLogLum = %f\n", min_logLum, max_logLum);
+  //unsigned int *hist_host = (unsigned int *) malloc(sizeof(unsigned int) * numBins);
+  //memset(hist_host, 0, numBins * sizeof(unsigned int));
+  //float lumRange = max_logLum - min_logLum;
+  //for (int i = 0; i < numRows * numCols; i++) {
+  //  int bin = (h_luminance[i] - min_logLum) / lumRange * numBins;
+  //  hist_host[bin]++;
+  //}
+  //unsigned int *hist_from_device = (unsigned int *) malloc(sizeof(unsigned int) * numBins);
+  //checkCudaErrors(cudaMemcpy(hist_from_device, d_cdf, sizeof(unsigned int) * numBins, cudaMemcpyDeviceToHost));
+  //int mismatch_counter = 0;
+  //for (int i = 0; i < numBins; i++) {
+  //    if (hist_from_device[i] != hist_host[i]) {
+  //        printf("%d: %d != %d\n", i, hist_from_device[i], hist_host[i]);
+  //        mismatch_counter++;
+  //    }
+  //}
+  //printf("%d mismatch in hist\n", mismatch_counter);
+  // \end debug
 
   checkCudaErrors(cudaMemcpy(d_cdf, h_cdf, sizeof(unsigned int) * numBins, cudaMemcpyHostToDevice));
 
